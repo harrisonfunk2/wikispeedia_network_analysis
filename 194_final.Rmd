@@ -1,0 +1,520 @@
+---
+title: 'A Network Analysis of Wikispeedia'
+author: "Jayden Gould, Harrison Funk, Elijah DiFuria, Kian Jadbabaei"
+date: "2026-03-04"
+output:
+  pdf_document:
+    toc: false
+    number_sections: true
+  html_document:
+    toc: false
+    df_print: paged
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.width = 6, fig.height = 4.5, fig.align = "center",
+                      out.width = "100%")
+library(igraph)
+library(dplyr)
+library(Matrix)
+set.seed(194)
+```
+
+\newpage
+
+# Introduction
+
+Wikispeedia is an online game where players attempt to navigate from one Wikipedia article to another using only hyperlinks embedded in the articles. The game is built on a condensed version of Wikipedia containing only 4,604 articles and over 119,000 hyperlinks between them. Robert West and Jure Leskovec created it at Stanford University as a tool for studying how people find information in complex networks.
+
+For this project, we treat the Wikipedia hyperlink structure behind Wikispeedia as a directed network. Each article is a node, and if there is a hyperlink connecting two articles, then there is a directed edge. This gives us a real-world information network to explore.
+
+Our analysis has several goals. First, we want to understand the basic structure of the network by checking how dense it is, how far apart articles are from each other, and which articles serve as major hubs. Second, we want to identify communities of topically related articles using multiple detection algorithms and see whether those communities align with known Wikipedia categories. Third, we want to examine the adjacency matrix to visualize community structure. Finally, we use a Monte Carlo null model test to verify that the community structure we find is meaningful and not random.
+
+# Methodology
+
+## Data Loading and Preparation
+
+We loaded the Wikispeedia dataset from the SNAP repository. This dataset contains 6 files but we use the two files `links.tsv` and `categories.tsv` to create our igraph dataset. `links.tsv` shows all of the edges in the network. `categories.tsv` shows the pre-made Wikispeedia categories. 
+
+```{r}
+# Read the edge list
+edges <- read.delim("wikispeedia_paths-and-graph/links.tsv",
+                    header = FALSE, comment.char = "#",
+                    stringsAsFactors = FALSE)
+colnames(edges) <- c("from", "to")
+
+# Build directed igraph
+wiki_net <- graph_from_data_frame(edges, directed = TRUE)
+
+# Read categories and attach top-level category as vertex attribute
+cats <- read.delim("wikispeedia_paths-and-graph/categories.tsv",
+                   header = FALSE, comment.char = "#",
+                   stringsAsFactors = FALSE)
+colnames(cats) <- c("article", "category")
+
+# Extract top-level category
+cats <- cats %>%
+  mutate(top_cat = sapply(strsplit(category, "\\."), function(x) {
+    if (length(x) >= 2) x[2] else "Other"
+  }))
+
+# Keep first category per article
+cats_unique <- cats %>% distinct(article, .keep_all = TRUE)
+
+# Assign to vertices
+V(wiki_net)$category <- cats_unique$top_cat[match(V(wiki_net)$name,
+                                                   cats_unique$article)]
+V(wiki_net)$category[is.na(V(wiki_net)$category)] <- "Uncategorized"
+```
+
+```{r, results='asis'}
+cat("The full network contains", vcount(wiki_net), "nodes and",
+    ecount(wiki_net), "directed edges, with a density of",
+    round(graph.density(wiki_net), 5), ".\n")
+```
+
+## Induced Subgraphs
+
+We generated four induced subgraphs by randomly sampling 200 nodes from the full network. Each subgraph keeps all edges that exist between the sampled nodes, preserving the local link structure of the original network.
+
+```{r}
+set.seed(194)
+sub1 <- induced_subgraph(wiki_net, sample(V(wiki_net), 200))
+sub2 <- induced_subgraph(wiki_net, sample(V(wiki_net), 200))
+sub3 <- induced_subgraph(wiki_net, sample(V(wiki_net), 200))
+sub4 <- induced_subgraph(wiki_net, sample(V(wiki_net), 200))
+
+subgraph_summary <- data.frame(
+  Subgraph = paste0("sub", 1:4),
+  Nodes = c(vcount(sub1), vcount(sub2), vcount(sub3), vcount(sub4)),
+  Edges = c(ecount(sub1), ecount(sub2), ecount(sub3), ecount(sub4)),
+  Density = round(c(graph.density(sub1), graph.density(sub2),
+                     graph.density(sub3), graph.density(sub4)), 4)
+)
+knitr::kable(subgraph_summary, caption = "Summary of four induced subgraphs (200 nodes each)")
+```
+
+# Analysis
+
+## Network Visualization
+
+We visualized each subgraph using three different algorithms: Fruchterman-Reingold (a layout that spreads nodes evenly), Kamada-Kawai (places nodes so that graph-theoretic distances match geometric distances), and a circular layout (which places all nodes on a circle, making the internal edge structure easy to see). Nodes are colored by their top-level Wikipedia category and sized proportionally to their total degree.
+
+```{r}
+# Create a consistent color palette for categories for graphs
+all_cats <- sort(unique(V(wiki_net)$category))
+cat_colors <- rainbow(length(all_cats), alpha = 0.8)
+names(cat_colors) <- all_cats
+```
+
+```{r, fig.width=10, fig.height=5}
+par(mfrow = c(1, 1), mar = c(1, 1, 2.5, 1))
+node_col1 <- cat_colors[V(sub1)$category]
+node_size1 <- 3 + 2 * sqrt(degree(sub1))
+
+plot(sub1, layout = layout_with_fr(sub1),
+     vertex.color = node_col1, vertex.size = node_size1,
+     vertex.label = NA, edge.arrow.size = 0.25,
+     edge.color = rgb(0.3, 0.3, 0.3, 0.3),
+     main = "Subgraph 1 - Fruchterman-Reingold")
+
+plot(sub1, layout = layout_with_kk(sub1),
+     vertex.color = node_col1, vertex.size = node_size1,
+     vertex.label = NA, edge.arrow.size = 0.25,
+     edge.color = rgb(0.3, 0.3, 0.3, 0.3),
+     main = "Subgraph 1 - Kamada-Kawai")
+
+plot(sub1, layout = layout_in_circle(sub1),
+     vertex.color = node_col1, vertex.size = node_size1,
+     vertex.label = NA, edge.arrow.size = 0.25,
+     edge.color = rgb(0.3, 0.3, 0.3, 0.3),
+     main = "Subgraph 1 - Circular")
+
+legend("bottomleft", legend = all_cats, fill = cat_colors,
+       cex = 0.6, ncol = 2, bty = "n", title = "Category",
+       title.cex = 0.7, x.intersp = 0.8, y.intersp = 1.1)
+```
+
+The same three layout algorithms were also applied to subgraphs 2, 3, and 4, and those plots are provided in the Appendix for reference.
+
+Across all four subgraphs and three layouts, we notice a pattern: the force-directed layouts naturally pull well-connected nodes toward the center and push the more isolated nodes to the outside. Some nodes act as hubs, drawing many edges and sitting at the center of their clusters. The circular layout makes it easy to see the overall density of connections and highlights that edges are not evenly distributed, as certain regions have more crossing edges, corresponding to densely interconnected groups of articles.
+
+## Network Metrics
+
+### Whole-Network Metrics
+
+We computed several standard metrics on the full Wikispeedia network to characterize its global structure.
+
+```{r}
+# Reciprocity
+recip <- reciprocity(wiki_net)
+
+# Transitivity
+trans <- transitivity(wiki_net, type = "global")
+
+# Degree assortativity
+assort <- assortativity_degree(wiki_net, directed = TRUE)
+
+# For diameter and avg path length, use largest strongly connected component
+comp <- components(wiki_net, mode = "strong")
+lcc_ids <- which(comp$membership == which.max(comp$csize))
+wiki_lcc <- induced_subgraph(wiki_net, lcc_ids)
+
+diam <- diameter(wiki_lcc, directed = TRUE)
+avg_path <- mean_distance(wiki_lcc, directed = TRUE)
+
+metrics_df <- data.frame(
+  Metric = c("Nodes", "Edges", "Density", "Reciprocity",
+             "Global Clustering Coeff.", "Degree Assortativity",
+             "Diameter (largest SCC)", "Avg. Path Length (largest SCC)"),
+  Value = c(vcount(wiki_net), ecount(wiki_net),
+            round(graph.density(wiki_net), 5),
+            round(recip, 4), round(trans, 4), round(assort, 4),
+            diam, round(avg_path, 3))
+)
+knitr::kable(metrics_df, caption = "Whole-network metrics for the Wikispeedia hyperlink graph")
+```
+
+The network is pretty scattered, which is common for information networks of this size. The reciprocity tells us what fraction of links are mutual as in if article A links to B, how often does B link back to A. The global clustering coefficient measures the tendency for articles to form tightly interconnected triangles. The diameter and average path length, computed on the largest strongly connected component, tell us how many clicks it takes to get between articles.
+
+### Node-Level Metrics
+
+```{r}
+# In-degree and out-degree for full network
+in_deg <- degree(wiki_net, mode = "in")
+out_deg <- degree(wiki_net, mode = "out")
+
+# Top 10 articles by in-degree (most linked-to)
+top_in <- in_deg %>% sort(decreasing = TRUE) %>% head(10)
+cat("Top 10 articles by in-degree (most linked-to):\n")
+data.frame(Article = names(top_in), In_Degree = as.integer(top_in))
+```
+
+```{r}
+# Betweenness centrality on full network
+btw <- betweenness(wiki_net, directed = TRUE)
+top_btw <- btw %>% sort(decreasing = TRUE) %>% head(10)
+cat("Top 10 articles by betweenness centrality:\n")
+data.frame(Article = names(top_btw),
+           Betweenness = round(as.numeric(top_btw), 1))
+```
+
+Beyond degree and betweenness, we also computed eigenvector centrality for every node. Eigenvector centrality gives high scores to articles that are linked to by other important articles. An article can have a lower number of connections but still rank highly if its neighbors are themselves well-connected hubs. These three centrality measures give us an idea of which articles have the most important structural roles in the network.
+
+```{r}
+# Eigenvector centrality
+eigen_vals <- eigen_centrality(wiki_net, directed = TRUE)$vector %>%
+  sort(decreasing = TRUE)
+top_eigen <- eigen_vals %>% head(10)
+cat("Top 10 articles by eigenvector centrality:\n")
+data.frame(Article = names(top_eigen),
+           Eigen_Centrality = round(as.numeric(top_eigen), 3))
+```
+
+```{r, fig.width=7, fig.height=3.5}
+par(mfrow = c(1, 2))
+
+# In-degree distribution (log-log)
+in_tab <- in_deg %>% table()
+plot(as.numeric(names(in_tab)), as.numeric(in_tab),
+     log = "xy", pch = 16, cex = 0.7, col = "steelblue",
+     xlab = "In-Degree (k)", ylab = "Frequency",
+     main = "In-Degree Distribution (log-log)")
+
+# Out-degree distribution (log-log)
+out_tab <- out_deg %>% table()
+plot(as.numeric(names(out_tab)), as.numeric(out_tab),
+     log = "xy", pch = 16, cex = 0.7, col = "tomato",
+     xlab = "Out-Degree (k)", ylab = "Frequency",
+     main = "Out-Degree Distribution (log-log)")
+```
+
+The in-degree distribution follows a heavy-tailed pattern on the log-log plot, which is characteristic of many real-world networks. A small number of articles receive a large number of incoming links, while most articles are linked to by only a few others. The out-degree distribution is somewhat less skewed, since the number of outgoing links depends more on how detailed an article is. Looking across all three centrality measures, the same handful of broad articles tend to dominate, suggesting the Wikispeedia network has a clear core of highly central articles that players are likely to pass through regardless of their route.
+
+### Edge-Level Metrics
+
+At the edge level, we examined edge betweenness centrality, which counts how many shortest paths pass through each edge. Edges with high betweenness act as bridges between different regions of the network, if they were removed, paths between certain articles would become much longer.
+
+```{r}
+ebtw <- edge_betweenness(wiki_net, directed = TRUE)
+cat("Edge betweenness summary:\n")
+summary(ebtw)
+cat("\nTop 10 edges by betweenness:\n")
+top_edges_idx <- ebtw %>% order(decreasing = TRUE) %>% head(10)
+top_edge_list <- as_edgelist(wiki_net)[top_edges_idx, ]
+data.frame(From = top_edge_list[, 1],
+           To = top_edge_list[, 2],
+           Edge_Betweenness = round(ebtw[top_edges_idx], 1))
+```
+
+The edge betweenness distribution is heavily right-skewed indicating most edges carry relatively few shortest paths, but a small number of edges are critical bridges. These high-betweenness edges tend to connect articles in different subject domains. For example, linking a history article to a geography article, their removal would substantially increase path lengths between those domains. This adds to the reciprocity reported in the whole network metrics table, which showed that a fraction of links are bidirectional. This shows the tendency for related articles to cross reference each other.
+
+
+## Community Detection
+
+We ran three community detection algorithms on an undirected version of subgraph 1 to identify clusters of closely related articles. We used a subgraph rather than the full network to keep computation more simple while still revealing meaningful structure.
+
+```{r}
+sub1_und <- as.undirected(sub1, mode = "collapse")
+
+# Fast Greedy (modularity optimization)
+fg <- cluster_fast_greedy(sub1_und)
+
+# Louvain
+lv <- cluster_louvain(sub1_und)
+
+# Walktrap (random walk based)
+wt <- cluster_walktrap(sub1_und)
+
+comm_compare <- data.frame(
+  Algorithm = c("Fast Greedy", "Louvain", "Walktrap"),
+  Communities = c(length(fg), length(lv), length(wt)),
+  Modularity = round(c(modularity(fg), modularity(lv), modularity(wt)), 4)
+)
+knitr::kable(comm_compare,
+             caption = "Comparison of community detection algorithms on Subgraph 1")
+```
+
+```{r, fig.width=7, fig.height=3.5}
+par(mfrow = c(1, 3), mar = c(1, 1, 2, 1))
+
+plot(fg, sub1_und, vertex.size = 5, vertex.label = NA,
+     edge.color = rgb(0.3, 0.3, 0.3, 0.3),
+     main = paste0("Fast Greedy (Q=", round(modularity(fg), 3), ")"))
+
+plot(lv, sub1_und, vertex.size = 5, vertex.label = NA,
+     edge.color = rgb(0.3, 0.3, 0.3, 0.3),
+     main = paste0("Louvain (Q=", round(modularity(lv), 3), ")"))
+
+plot(wt, sub1_und, vertex.size = 5, vertex.label = NA,
+     edge.color = rgb(0.3, 0.3, 0.3, 0.3),
+     main = paste0("Walktrap (Q=", round(modularity(wt), 3), ")"))
+```
+
+All three algorithms find meaningful community structure, with modularity scores well above zero. The Louvain method and Fast Greedy tend to produce similar results, which suggests the communities are strong features of the network.
+
+```{r, results='asis'}
+mod_scores <- c(modularity(fg), modularity(lv), modularity(wt))
+best_idx <- which.max(mod_scores)
+best <- list(fg, lv, wt)[[best_idx]]
+best_name <- c("Fast Greedy", "Louvain", "Walktrap")[best_idx]
+
+mem <- membership(best)
+top_comms <- names(sort(table(mem), decreasing = TRUE))[1:min(5, length(unique(mem)))]
+
+comp_rows <- lapply(top_comms, function(cc) {
+  articles_in_comm <- V(sub1_und)$name[mem == as.integer(cc)]
+  comm_cats <- V(sub1)$category[V(sub1)$name %in% articles_in_comm]
+  top_cats <- sort(table(comm_cats), decreasing = TRUE)[1:min(3, length(unique(comm_cats)))]
+  data.frame(
+    Community = paste0("Community ", cc),
+    Size = length(articles_in_comm),
+    Top_Categories = paste(paste0(names(top_cats), " (", top_cats, ")"), collapse = ", "),
+    stringsAsFactors = FALSE
+  )
+})
+
+comp_df <- do.call(rbind, comp_rows)
+colnames(comp_df) <- c("Community", "Size", "Top Categories (count)")
+
+cat(paste0("**Best algorithm: ", best_name, "**\n\n"))
+knitr::kable(comp_df,
+             caption = paste0("Category composition of the five largest communities detected by ", best_name))
+```
+
+The communities generally cluster along topical lines, which makes sense. To verify that this pattern is not unique to one particular random sample, we also ran Louvain community detection on the other three subgraphs:
+
+```{r}
+sub_und_list <- lapply(list(sub1, sub2, sub3, sub4), as.undirected, mode = "collapse")
+lv_all <- lapply(sub_und_list, cluster_louvain)
+
+cross_sub <- data.frame(
+  Subgraph = paste0("sub", 1:4),
+  Communities = sapply(lv_all, length),
+  Modularity = sapply(lv_all, modularity) %>% round(4)
+)
+knitr::kable(cross_sub,
+             caption = "Louvain community detection across all four subgraphs")
+```
+
+All four subgraphs show comparable modularity values and similar numbers of communities, indicating that the community structure we observe on subgraph 1 is a consistent feature of the underlying network.
+
+Since the Louvain algorithm uses random local moves during optimization, it yields slightly different partitions each time it runs. This explains the minor variations in subgraph 1's metrics between Tables 3 and 5.
+
+## Adjacency Matrix
+
+We examined the adjacency matrix of subgraph 1 before and after reordering the nodes by their community membership. The original ordering is essentially arbitrary, so the adjacency matrix appears as a scattered pattern of dots. After reordering, nodes in the same community are placed next to each other, revealing block-diagonal structure.
+
+```{r, fig.width=7, fig.height=3.5}
+par(mfrow = c(1, 2), mar = c(2, 2, 3, 1))
+
+A1 <- as_adjacency_matrix(sub1, sparse = TRUE)
+
+image(A1, main = "Adjacency Matrix - Original Order",
+      xlab = "", ylab = "", sub = "")
+
+ord <- order(membership(best))
+image(A1[ord, ord], main = paste0("Adjacency Matrix - Reordered by ", best_name),
+      xlab = "", ylab = "", sub = "")
+```
+
+The reordered matrix shows clear block structure along the diagonal. Each block corresponds to a detected community, and within-block density is visibly higher than in off-diagonal regions. This visually confirms that the community detection algorithms are picking up on real structural patterns in the network.
+
+## Monte Carlo Null Model Test
+
+To confirm that the community structure is statistically meaningful, we performed a Monte Carlo null model test on the full network. We ran Louvain on the full undirected Wikispeedia graph and recorded its modularity, then generated 1,000 Erdos-Renyi random graphs with the same number of nodes and edges and applied the same algorithm to each. We use the full network rather than a subgraph because random 200-node subgraphs are extremely scattered, which falsely inflates their modularity.
+
+```{r, fig.width=6, fig.height=4, cache=TRUE}
+wiki_und <- as.undirected(wiki_net, mode = "collapse")
+lv_full <- cluster_louvain(wiki_und)
+Q_obs <- modularity(lv_full)
+
+n_sim <- 1000
+Q_null <- numeric(n_sim)
+
+n_nodes_full <- vcount(wiki_und)
+n_edges_full <- ecount(wiki_und)
+
+for (i in 1:n_sim) {
+  g_rand <- erdos.renyi.game(n_nodes_full, n_edges_full, type = "gnm")
+  lv_rand <- cluster_louvain(g_rand)
+  Q_null[i] <- modularity(lv_rand)
+}
+
+# p-value: fraction of null Q >= observed Q
+p_val <- mean(Q_null >= Q_obs)
+
+# Plot null and Q observed
+h <- hist(Q_null, breaks = 30, plot = FALSE)
+plot(h, col = "lightblue", border = "grey",
+     main = "Monte Carlo Null Model: Modularity (Full Network)",
+     xlab = "Modularity (Q)",
+     xlim = c(min(h$breaks), max(Q_obs + 0.02, max(h$breaks))))
+abline(v = Q_obs, col = "red", lwd = 2.5, lty = 2)
+legend("topright",
+       legend = c(paste0("Observed Q = ", round(Q_obs, 4)),
+                  paste0("p-value = ", p_val)),
+       col = c("red", NA), lwd = c(2, NA), lty = c(2, NA),
+       bty = "n", cex = 0.9)
+```
+
+The observed modularity (red dashed line) falls far to the right of the null distribution. None of the 1,000 random graphs achieved a modularity anywhere close to the observed value, giving a Monte Carlo p-value of effectively zero. The community structure we detected is far stronger than what would arise by chance.
+
+# Results
+
+Our analysis yielded several concrete findings about the Wikispeedia network:
+
+The network has a diameter of `r diam` and an average path length of `r round(avg_path, 2)` within its largest strongly connected component, confirming small-world properties that make the Wikispeedia game playable as most articles are reachable in just a few clicks. The reciprocity of `r round(recip, 3)` indicates that roughly `r round(recip * 100, 1)`% of hyperlinks are mutual, reflecting the tendency of related articles to cross-reference each other.
+
+Three centrality measures (degree, betweenness, and eigenvector centrality) consistently identify the same core set of hub articles. The in-degree distribution is heavy-tailed, with a handful of broad topics dominating incoming links while most articles have only a few. At the edge level, edge betweenness is similarly skewed: a small fraction of edges act as critical bridges between subject domains.
+
+Community detection with Fast Greedy, Louvain, and Walktrap all produced modularity scores well above zero on subgraph 1, and Louvain applied across all four subgraphs yielded consistent results, confirming the stability of the community structure. The detected communities align with known article categories as science articles cluster with science, history with history, and so on. Reordering the adjacency matrix by community membership revealed clear block-diagonal structure, visually confirming these findings.
+
+Finally, the Monte Carlo null model test over 1,000 random graphs confirmed that the observed modularity of `r round(Q_obs, 4)` is significantly higher than the null distribution (p = `r p_val`), ruling out chance as an explanation for the community structure.
+
+# Conclusion
+
+This project explored the structure of the Wikispeedia hyperlink network through visualization, centrality analysis, community detection, adjacency matrix examination, and statistical testing. The network exhibits properties common to many real-world information networks like how it is sparse, has a heavy-tailed degree distribution, shows small-world characteristics, and contains well-defined communities that correspond to real categories.
+
+One interesting direction for future work would be to incorporate the navigation path data that comes with the Wikispeedia dataset. By analyzing which paths players actually take, we could build a weighted network where edge weights reflect how frequently each link is clicked. This would let us study the dynamic patterns of how humans actually navigate through the network instead of just the static hyperlink structure. Another extension would be to compare different null models. For example, using a configuration model that preserves the degree sequence would provide a stricter test of community significance.
+
+# References
+
+1. SNAP Dataset: Wikispeedia navigation paths. Stanford Network Analysis Project. https://snap.stanford.edu/data/wikispeedia.html
+
+\newpage
+
+# Appendix: Code
+
+All R code used in this analysis is reproduced below.
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```
+
+\newpage
+
+# Appendix: Subgraph Visualizations (2–4)
+
+The following plots show subgraphs 2, 3, and 4 visualized under the same three layout algorithms used for subgraph 1 in the main text. Nodes are colored by top-level Wikipedia category and sized by total degree.
+
+```{r, fig.width=10, fig.height=5, fig.cap="Subgraph 2 visualized under three layout algorithms."}
+par(mfrow = c(1, 3), mar = c(1, 1, 2.5, 1))
+node_col2 <- cat_colors[V(sub2)$category]
+node_size2 <- 3 + 2 * sqrt(degree(sub2))
+
+plot(sub2, layout = layout_with_fr(sub2),
+     vertex.color = node_col2, vertex.size = node_size2,
+     vertex.label = NA, edge.arrow.size = 0.25,
+     edge.color = rgb(0.3, 0.3, 0.3, 0.3),
+     main = "Subgraph 2 - Fruchterman-Reingold")
+
+plot(sub2, layout = layout_with_kk(sub2),
+     vertex.color = node_col2, vertex.size = node_size2,
+     vertex.label = NA, edge.arrow.size = 0.25,
+     edge.color = rgb(0.3, 0.3, 0.3, 0.3),
+     main = "Subgraph 2 - Kamada-Kawai")
+
+plot(sub2, layout = layout_in_circle(sub2),
+     vertex.color = node_col2, vertex.size = node_size2,
+     vertex.label = NA, edge.arrow.size = 0.25,
+     edge.color = rgb(0.3, 0.3, 0.3, 0.3),
+     main = "Subgraph 2 - Circular")
+```
+
+```{r, fig.width=10, fig.height=5, fig.cap="Subgraph 3 visualized under three layout algorithms."}
+par(mfrow = c(1, 3), mar = c(1, 1, 2.5, 1))
+node_col3 <- cat_colors[V(sub3)$category]
+node_size3 <- 3 + 2 * sqrt(degree(sub3))
+
+plot(sub3, layout = layout_with_fr(sub3),
+     vertex.color = node_col3, vertex.size = node_size3,
+     vertex.label = NA, edge.arrow.size = 0.25,
+     edge.color = rgb(0.3, 0.3, 0.3, 0.3),
+     main = "Subgraph 3 - Fruchterman-Reingold")
+
+plot(sub3, layout = layout_with_kk(sub3),
+     vertex.color = node_col3, vertex.size = node_size3,
+     vertex.label = NA, edge.arrow.size = 0.25,
+     edge.color = rgb(0.3, 0.3, 0.3, 0.3),
+     main = "Subgraph 3 - Kamada-Kawai")
+
+plot(sub3, layout = layout_in_circle(sub3),
+     vertex.color = node_col3, vertex.size = node_size3,
+     vertex.label = NA, edge.arrow.size = 0.25,
+     edge.color = rgb(0.3, 0.3, 0.3, 0.3),
+     main = "Subgraph 3 - Circular")
+```
+
+```{r, fig.width=10, fig.height=5, fig.cap="Subgraph 4 visualized under three layout algorithms."}
+par(mfrow = c(1, 3), mar = c(1, 1, 2.5, 1))
+node_col4 <- cat_colors[V(sub4)$category]
+node_size4 <- 3 + 2 * sqrt(degree(sub4))
+
+plot(sub4, layout = layout_with_fr(sub4),
+     vertex.color = node_col4, vertex.size = node_size4,
+     vertex.label = NA, edge.arrow.size = 0.25,
+     edge.color = rgb(0.3, 0.3, 0.3, 0.3),
+     main = "Subgraph 4 - Fruchterman-Reingold")
+
+plot(sub4, layout = layout_with_kk(sub4),
+     vertex.color = node_col4, vertex.size = node_size4,
+     vertex.label = NA, edge.arrow.size = 0.25,
+     edge.color = rgb(0.3, 0.3, 0.3, 0.3),
+     main = "Subgraph 4 - Kamada-Kawai")
+
+plot(sub4, layout = layout_in_circle(sub4),
+     vertex.color = node_col4, vertex.size = node_size4,
+     vertex.label = NA, edge.arrow.size = 0.25,
+     edge.color = rgb(0.3, 0.3, 0.3, 0.3),
+     main = "Subgraph 4 - Circular")
+```
+
+```{r, fig.width=5, fig.height=3, fig.cap="Category color legend for all subgraph visualizations."}
+par(mar = c(0, 0, 1, 0))
+plot.new()
+legend("center", legend = all_cats, fill = cat_colors,
+       cex = 0.85, ncol = 2, bty = "n",
+       title = "Node Category", title.cex = 1.0,
+       x.intersp = 0.9, y.intersp = 1.2)
+```
